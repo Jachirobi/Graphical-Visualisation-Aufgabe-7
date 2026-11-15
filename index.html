@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    // Design vor dem ersten Zeichnen setzen (kein Aufblitzen des hellen Designs)
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem("theme"); } catch (e) {}
+      if (t !== "dark" && t !== "light") {
+        t = window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      document.documentElement.setAttribute("data-theme", t);
+    })();
+  </script>
+  <title>Z-Buffer – WebGL</title>
+  <meta name="description" content="Eine Straßenschlucht aus Häusern, Brücken, Rohren und Autos; der Fragment-Shader stellt den Tiefen-Buffer über gl_FragCoord.z als Graustufen dar – roh und linearisiert.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#buehne">Zur Szene springen</a>
+
+  <header>
+    <div class="topbar">
+      <button type="button" id="theme-switch" class="theme-switch" role="switch" aria-checked="false">
+        <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+        <span>Dunkles Design</span>
+      </button>
+    </div>
+    <div class="intro">
+      <h1>Der Z-Buffer als Graustufen</h1>
+      <p>Eine Straßenschlucht reicht 65 Einheiten in die Tiefe: zwei Häuserreihen, Brücken und Rohre quer über der Straße, Wassertanks auf den Dächern und drei Autos aus Quadern, Zylindern, Kegeln und Kugeln, die einander durchdringen. Der Fragment-Shader gibt statt der Farbe den Tiefenwert <code>gl_FragCoord.z</code> jedes Fragments aus (nahe Flächen dunkel, ferne hell). Bewegen Sie die Kamera mit <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> und drehen Sie die Szene mit den Pfeiltasten.</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="stage" id="buehne" tabindex="-1" aria-labelledby="h-szene">
+      <h2 id="h-szene">Die Szene</h2>
+
+      <figure class="scene-wrap">
+        <canvas id="gl" class="gl-canvas" width="1600" height="1000" tabindex="0" role="img" aria-labelledby="canvas-desc" aria-describedby="key-hint">
+          Ihr Browser kann das Canvas-Element nicht darstellen.
+        </canvas>
+        <span class="split-line" id="split-line" hidden></span>
+        <span class="split-label left" id="split-l" hidden aria-hidden="true">Farbe</span>
+        <span class="split-label right" id="split-r" hidden aria-hidden="true">Z-Buffer linear</span>
+        <figcaption id="canvas-desc" class="visually-hidden">Straßenschlucht.</figcaption>
+      </figure>
+      <p id="key-hint" class="hint">Kamera in der XY-Ebene: <kbd>W</kbd> hoch, <kbd>S</kbd> runter, <kbd>A</kbd> links, <kbd>D</kbd> rechts. Szene drehen: <kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd> oder ziehen. Mit <kbd>Umschalt</kbd> geht es schneller. Ansicht: <kbd>M</kbd> oder <kbd>1</kbd>–<kbd>4</kbd>, <kbd>R</kbd> zurücksetzen.</p>
+
+      <div class="cam-grid" id="steuerung">
+        <div class="ctrl-group" role="group" aria-labelledby="h-tiefe">
+          <h3 id="h-tiefe">Tiefen-Buffer</h3>
+          <div class="select" role="radiogroup" id="mode-group" aria-labelledby="mode-label" style="justify-content:flex-start">
+            <span class="select-label" id="mode-label">Ansicht <kbd aria-hidden="true">M</kbd>:</span>
+            <button type="button" class="seg" role="radio" data-mode="farbe" aria-checked="false" tabindex="-1">Farbe</button>
+            <button type="button" class="seg" role="radio" data-mode="roh" aria-checked="false" tabindex="-1">Z roh</button>
+            <button type="button" class="seg" role="radio" data-mode="linear" aria-checked="true" tabindex="0">Z linear</button>
+            <button type="button" class="seg" role="radio" data-mode="geteilt" aria-checked="false" tabindex="-1">Geteilt</button>
+          </div>
+          <div class="anim-row">
+            <label for="near">Near-Ebene <var>n</var></label>
+            <input type="range" id="near" min="0.1" max="20" step="0.1" value="1">
+            <output id="near-out" for="near">1,0</output>
+          </div>
+          <div class="anim-row">
+            <label for="far">Far-Ebene <var>f</var></label>
+            <input type="range" id="far" min="10" max="150" step="1" value="70">
+            <output id="far-out" for="far">70</output>
+          </div>
+          <div class="ctrl-row">
+            <button type="button" class="btn btn-sm" id="btn-clip">Near 1 / Far 70</button>
+          </div>
+          <dl class="readout-grid" aria-label="Werte des Tiefen-Buffers">
+            <dt>Grauwert unter Maus</dt><dd id="px-value">–</dd>
+            <dt>Roh z = 0,5 bei Abstand</dt><dd id="ro-half">–</dd>
+            <dt>Roh z = 0,9 bei Abstand</dt><dd id="ro-90">–</dd>
+            <dt>Anteil der Strecke für die dunkle Hälfte</dt><dd id="ro-share">–</dd>
+          </dl>
+        </div>
+
+        <div class="ctrl-group" role="group" aria-labelledby="h-kamera">
+          <h3 id="h-kamera">Kamera und Drehung</h3>
+          <div class="ctrl-row">
+            <button type="button" class="btn btn-sm" id="btn-a" aria-keyshortcuts="A">Links <kbd aria-hidden="true">A</kbd></button>
+            <button type="button" class="btn btn-sm" id="btn-w" aria-keyshortcuts="W">Hoch <kbd aria-hidden="true">W</kbd></button>
+            <button type="button" class="btn btn-sm" id="btn-s" aria-keyshortcuts="S">Runter <kbd aria-hidden="true">S</kbd></button>
+            <button type="button" class="btn btn-sm" id="btn-d" aria-keyshortcuts="D">Rechts <kbd aria-hidden="true">D</kbd></button>
+          </div>
+          <div class="ctrl-row">
+            <button type="button" class="btn btn-sm" id="btn-rl" aria-keyshortcuts="ArrowLeft">Drehen links <kbd aria-hidden="true">←</kbd></button>
+            <button type="button" class="btn btn-sm" id="btn-rr" aria-keyshortcuts="ArrowRight">Drehen rechts <kbd aria-hidden="true">→</kbd></button>
+            <button type="button" class="btn btn-sm" id="btn-ru" aria-keyshortcuts="ArrowUp">Kippen hoch <kbd aria-hidden="true">↑</kbd></button>
+            <button type="button" class="btn btn-sm" id="btn-rd" aria-keyshortcuts="ArrowDown">Kippen runter <kbd aria-hidden="true">↓</kbd></button>
+          </div>
+          <div class="ctrl-row">
+            <button type="button" class="btn btn-sm" id="btn-reset" aria-keyshortcuts="R">Zurücksetzen <kbd aria-hidden="true">R</kbd></button>
+            <label class="check"><input type="checkbox" id="toggle-shortcuts" checked aria-describedby="shortcut-hint"> Tastenkürzel aktiv</label>
+          </div>
+          <p id="shortcut-hint" class="visually-hidden">Einzeltasten W, A, S, D, M, R und 1 bis 4. Abschalten, wenn sie mit Hilfsmitteln kollidieren.</p>
+          <dl class="readout-grid" aria-label="Kamerawerte">
+            <dt>Kamera (x | y | z)</dt><dd id="ro-cam">–</dd>
+            <dt>Drehung um Y</dt><dd id="ro-yaw">–</dd>
+            <dt>Drehung um X</dt><dd id="ro-pitch">–</dd>
+          </dl>
+        </div>
+      </div>
+
+      <p id="status" class="status" role="status" aria-live="polite" aria-atomic="true">WebGL wird gestartet …</p>
+    </section>
+
+    <section class="doc" aria-labelledby="h-bedienung">
+      <h2 id="h-bedienung">Bedienung</h2>
+      <div class="table-scroll">
+        <table class="keys">
+          <caption>Alle Interaktionen</caption>
+          <thead><tr><th scope="col">Taste</th><th scope="col">Wirkung</th><th scope="col">Auch per</th></tr></thead>
+          <tbody>
+            <tr><td><kbd>W</kbd> / <kbd>S</kbd></td><td>Kamera in der XY-Ebene nach oben bzw. unten verschieben (0,25 je Druck, mit <kbd>Umschalt</kbd> 1,0; gedrückt halten wiederholt)</td><td>Hoch, Runter</td></tr>
+            <tr><td><kbd>A</kbd> / <kbd>D</kbd></td><td>Kamera in der XY-Ebene nach links bzw. rechts verschieben</td><td>Links, Rechts</td></tr>
+            <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>Szene um die senkrechte Achse (Y) drehen, 5° je Druck, mit <kbd>Umschalt</kbd> 20°. Wirkt, solange der Fokus in der Szene liegt.</td><td>Drehen links/rechts, waagerecht ziehen</td></tr>
+            <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>Szene um die waagerechte Achse (X) kippen: <kbd>↑</kbd> hebt das hintere Ende an, sodass man von schräg oben in die Straße blickt (−15° bis 75°)</td><td>Kippen hoch/runter, senkrecht ziehen</td></tr>
+            <tr><td><kbd>M</kbd></td><td>Ansicht wechseln: Farbe → Z roh → Z linear → Geteilt</td><td>Auswahl „Ansicht“</td></tr>
+            <tr><td><kbd>1</kbd> … <kbd>4</kbd></td><td>Ansicht direkt wählen (1 Farbe, 2 Z roh, 3 Z linear, 4 Geteilt)</td><td>Auswahl „Ansicht“</td></tr>
+            <tr><td><kbd>R</kbd></td><td>Kamera und Drehung zurücksetzen</td><td>Zurücksetzen</td></tr>
+            <tr><td>–</td><td>Near- und Far-Ebene verschieben</td><td>Schieberegler (auch mit Pfeiltasten, wenn fokussiert)</td></tr>
+            <tr><td>–</td><td>Grauwert eines Pixels ablesen und in den Abstand zurückrechnen</td><td>Maus über die Szene bewegen</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Die Einzeltasten lassen sich über „Tastenkürzel aktiv“ abschalten. Die Pfeiltasten scrollen außerhalb der Szene wie gewohnt die Seite.</p>
+    </section>
+
+    <section class="doc doc-wide" aria-labelledby="h-zbuffer">
+      <h2 id="h-zbuffer">Der Z-Buffer-Algorithmus</h2>
+      <p>Neben dem Farbspeicher (Framebuffer) gibt es einen gleich großen Tiefenspeicher. Er wird vor jedem Bild mit dem größten Wert 1,0 gefüllt. Für jedes Fragment eines Dreiecks vergleicht die Grafikkarte dessen Tiefe mit dem gespeicherten Wert: Ist das Fragment näher, überschreibt es Farbe und Tiefe, sonst wird es verworfen. So entstehen Verdeckungen und Durchdringungen richtig, unabhängig von der Reihenfolge, in der die Objekte gezeichnet werden.</p>
+      <pre class="code"><code>für jedes Pixel (x, y):  tiefe[x][y] = 1.0;  farbe[x][y] = Hintergrund   // gl.clear(...)
+für jedes Dreieck, für jedes Fragment (x, y, z):
+  wenn z &lt; tiefe[x][y]:                                                    // gl.depthFunc(gl.LESS)
+    tiefe[x][y] = z;  farbe[x][y] = Farbe des Fragments</code></pre>
+      <p>In WebGL schaltet <code>gl.enable(gl.DEPTH_TEST)</code> den Algorithmus ein. Den Tiefen-Buffer selbst kann WebGL 1 nicht auslesen. Deshalb schreibt der Fragment-Shader den Wert, der dort landet, in die Farbe. Dort, wo sich zwei Körper durchdringen, erkennt man in der Graustufenansicht die Schnittkante: Auf ihr sind beide Flächen gleich weit entfernt und gleich grau.</p>
+    </section>
+
+    <section class="doc doc-wide" aria-labelledby="h-shader">
+      <h2 id="h-shader">Die Shader</h2>
+      <p>Der <strong>Vertex-Shader</strong> rechnet jede Ecke mit <var>P</var> · <var>V</var> · <var>M</var> in Clip-Koordinaten um. Danach teilt die Pipeline durch <var>w</var> (Normalized Device Coordinates, z ∈ [−1, 1]) und bildet z auf den Fensterbereich [0, 1] ab. Diesen Wert liefert im <strong>Fragment-Shader</strong> die eingebaute Variable <code>gl_FragCoord.z</code>: 0 an der Near-Ebene, 1 an der Far-Ebene. Kleiner Wert → dunkles Grau, also erscheinen nahe Fragmente dunkler.</p>
+      <pre class="code"><code>float z = gl_FragCoord.z;                    // 0 = Near, 1 = Far
+if (uMode == 1) {                            // roh
+  gl_FragColor = vec4(vec3(z), 1.0);
+} else if (uMode == 2) {                     // linear
+  float ndc = z * 2.0 - 1.0;
+  float d = 2.0 * uNear * uFar / (uFar + uNear - ndc * (uFar - uNear));
+  gl_FragColor = vec4(vec3((d - uNear) / (uFar - uNear)), 1.0);
+}</code></pre>
+      <p>Der Shader verlangt <code>highp</code>-Genauigkeit, wo verfügbar: Die rohen z-Werte der hinteren Szene liegen alle zwischen 0,99 und 1,0 und würden mit <code>mediump</code> zusammenfallen. Bei „Geteilt“ wird die Szene zweimal gezeichnet; die rechte Hälfte wird mit <code>gl.scissor</code> begrenzt und mit dem Tiefenmodus neu gezeichnet.</p>
+    </section>
+
+    <section class="doc doc-wide" aria-labelledby="h-skalierung">
+      <h2 id="h-skalierung">Skalierung zwischen Near und Far</h2>
+      <p>Die perspektivische Projektion bildet den Abstand <var>d</var> eines Punkts vor der Kamera nicht linear, sondern über 1/<var>d</var> ab:</p>
+      <div class="math" aria-label="Formeln zur Tiefe">
+        <div><var>z</var><sub>NDC</sub> = (<var>f</var> + <var>n</var>) / (<var>f</var> − <var>n</var>) − 2<var>fn</var> / ((<var>f</var> − <var>n</var>) · <var>d</var>), &nbsp; <var>z</var><sub>Fenster</sub> = ½ <var>z</var><sub>NDC</sub> + ½</div>
+        <div>Umkehrung: <var>d</var> = 2<var>fn</var> / (<var>f</var> + <var>n</var> − <var>z</var><sub>NDC</sub> · (<var>f</var> − <var>n</var>)), &nbsp; linearer Grauwert = (<var>d</var> − <var>n</var>) / (<var>f</var> − <var>n</var>)</div>
+      </div>
+      <p>Folge: Die halbe Genauigkeit des Tiefen-Buffers steckt direkt vor der Kamera. Bei <var>n</var> = 1 und <var>f</var> = 70 ist <var>z</var> = 0,5 schon bei einem Abstand von 1,97 erreicht. Die ganze Straße dahinter teilt sich die Werte 0,5 bis 1,0 und erscheint in der Ansicht „Z roh“ fast einheitlich weiß. Erst das Zurückrechnen auf den Abstand („Z linear“) macht die Tiefe sichtbar. Schieben Sie die Near-Ebene nach hinten, wird auch die rohe Ansicht kontrastreicher, dafür werden nahe Objekte abgeschnitten. Umgekehrt lohnt es sich, Far auf etwa 15 zu ziehen: Dann füllen allein das vordere Auto, das erste Rohr und die vorderen Häuser den ganzen Grauverlauf, und man sieht genau, wo Kabine und Karosserie ineinanderstecken und das Rohr in der Hauswand verschwindet. Alles dahinter wird weggeschnitten und bleibt weiß. Genau diese Abwägung beschreibt Nathan Reed im Material zur Aufgabe; Abhilfe schaffen dort Reversed-Z mit Gleitkomma-Tiefenpuffer, was WebGL 1 nicht anbietet.</p>
+      <svg class="chart" id="chart" viewBox="0 0 640 300" role="img" aria-label="Diagramm">
+        <g id="c-ticks"></g>
+        <line class="axis" x1="54" y1="254" x2="624" y2="254"></line>
+        <line class="axis" x1="54" y1="16" x2="54" y2="254"></line>
+        <line class="half" id="c-half" x1="0" y1="16" x2="0" y2="254"></line>
+        <polyline class="raw" id="c-raw" points=""></polyline>
+        <polyline class="lin" id="c-lin" points=""></polyline>
+        <text x="339" y="292" text-anchor="middle">Abstand d zur Kamera</text>
+        <text x="14" y="135" text-anchor="middle" transform="rotate(-90 14 135)">Grauwert</text>
+      </svg>
+      <ul class="chart-legend" aria-hidden="true">
+        <li><span class="l l-raw"></span>roh: gl_FragCoord.z</li>
+        <li><span class="l l-lin"></span>linear: (d − n) / (f − n)</li>
+        <li><span class="l l-half"></span>Abstand, bei dem roh 0,5 erreicht</li>
+      </ul>
+      <div class="table-scroll">
+        <table class="keys">
+          <caption>Grauwerte für ausgewählte Abstände bei den aktuellen Einstellungen (8-Bit-Stufe 0 … 255)</caption>
+          <thead><tr><th scope="col" class="num">Abstand <var>d</var></th><th scope="col" class="num">roh <var>z</var></th><th scope="col" class="num">Stufe</th><th scope="col" class="num">linear</th><th scope="col" class="num">Stufe</th></tr></thead>
+          <tbody id="depth-body"></tbody>
+        </table>
+      </div>
+      <p>Die Bildschirmausgabe hat nur 256 Graustufen. In der rohen Ansicht fallen deshalb ab einem Abstand von etwa 20 viele Abstände auf dieselbe Stufe – auch das zeigt die Anzeige „Grauwert unter Maus“: Dort wird der abgelesene Grauwert in einen Abstand zurückgerechnet, in der rohen Ansicht mit großen Sprüngen.</p>
+    </section>
+
+    <section class="doc doc-wide" aria-labelledby="h-objekte">
+      <h2 id="h-objekte">Aufbau der Szene</h2>
+      <p>Damit Tiefe und Verdeckung deutlich werden, ist die Szene als Straßenschlucht gebaut: Die Kamera steht bei <var>z</var> = 8 auf Augenhöhe über der Fahrbahn und blickt entlang −Z; der Turm am Straßenende steht 65 Einheiten entfernt. Die Häuser verdecken sich gegenseitig, die Querstraßen dazwischen lassen Licht in die Tiefe.</p>
+      <ul class="steps">
+        <li><strong>Häuser:</strong> sechs Quader je Straßenseite in unterschiedlicher Höhe, am Ende ein Turm mit Pyramidendach (Kegel mit vier Seiten, der im Turm steckt).</li>
+        <li><strong>Brücken und Rohre:</strong> zwei Quader und zwei Zylinder quer über der Straße, die links und rechts in die Häuser hineinragen. Im Tiefenbild sieht man die Schnittkante an der Hauswand.</li>
+        <li><strong>Wassertanks:</strong> drei Kugeln, halb im Dach versunken.</li>
+        <li><strong>Straße:</strong> Fahrbahn, Gehwege und Mittelmarkierung (Quader) sowie drei Autos, bei denen Kabine und Karosserie ineinanderstecken.</li>
+      </ul>
+      <p><strong>Transformationen:</strong> Die Kamera wird mit <var>V</var> = <var>T</var>(−<var>x</var>, −<var>y</var>, −8) nur in der XY-Ebene verschoben. Die Pfeiltasten drehen die ganze Szene um einen Punkt in der Straßenmitte: <var>M</var><sub>Szene</sub> = <var>T</var>(0, 2, −18) · <var>R<sub>x</sub></var> · <var>R<sub>y</sub></var> · <var>T</var>(0, −2, 18). Sichtfeld 45°.</p>
+      <div class="table-scroll">
+        <table class="keys">
+          <caption>Objekte der Szene (<span id="scene-count">–</span> Draw-Calls, <span id="scene-total">–</span> Dreiecke)</caption>
+          <thead><tr><th scope="col">Objekt</th><th scope="col">Grundkörper</th><th scope="col" class="num">Anzahl</th><th scope="col" class="num">Dreiecke</th></tr></thead>
+          <tbody id="scene-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="doc" aria-labelledby="h-a11y">
+      <h2 id="h-a11y">Barrierefreiheit</h2>
+      <dl class="hci">
+        <dt>Tastatur</dt>
+        <dd>Jede Funktion gibt es als Taste und als Schaltfläche; die Einzeltasten lassen sich abschalten, die Pfeiltasten wirken nur in der Szene (2.1.1, 2.1.4).</dd>
+        <dt>Textalternative</dt>
+        <dd>Das Canvas beschreibt Szene und Ansicht; Diagramm und Tabelle geben die Grauwerte zusätzlich als Zahlen an (1.1.1).</dd>
+        <dt>Rückmeldung</dt>
+        <dd>Ansichtswechsel und Einstellungen werden über eine Statusmeldung angesagt; die gewählte Ansicht ist mit Haken markiert (1.4.1, 4.1.3).</dd>
+        <dt>Bewegung</dt>
+        <dd>Die Szene bewegt sich nur auf Eingabe, es gibt keine automatische Animation (2.2.2).</dd>
+      </dl>
+    </section>
+
+    <section class="doc" aria-labelledby="h-qa">
+      <h2 id="h-qa">Test und Qualitätssicherung</h2>
+      <p>Getestet in Chrome unter macOS in beiden Designs: <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> bis zu den Grenzen, Drehen und Kippen mit allen Pfeiltasten und mit der Maus, alle vier Ansichten, Near- und Far-Regler über den ganzen Bereich (Near bleibt immer mindestens 5 vor Far), Grauwert-Anzeige in allen Ansichten. Die Werte in der Tabelle wurden mit den ausgelesenen Pixeln verglichen. Die Konsole (<kbd>Cmd</kbd>+<kbd>Alt</kbd>+<kbd>J</kbd>) zeigt nur eine Info-Meldung, keine Fehler.</p>
+    </section>
+
+    <section class="doc" aria-labelledby="h-quellen">
+      <h2 id="h-quellen">Quellen</h2>
+      <ul class="sources">
+        <li><strong>Skalierung der Tiefe:</strong> Nathan Reed, <a href="https://developer.nvidia.com/blog/visualizing-depth-precision/">Visualizing Depth Precision</a>, NVIDIA Developer Blog (Material zur Aufgabe).</li>
+        <li><strong>Tiefentest und Linearisierung:</strong> Joey de Vries, <a href="https://learnopengl.com/Advanced-OpenGL/Depth-testing">LearnOpenGL: Depth testing</a>.</li>
+        <li><strong>gl_FragCoord und Tiefenbereich:</strong> <a href="https://registry.khronos.org/OpenGL-Refpages/gl4/html/gl_FragCoord.xhtml">Khronos: gl_FragCoord</a>, <a href="https://registry.khronos.org/OpenGL/specs/es/2.0/GLSL_ES_Specification_1.00.pdf">GLSL ES 1.00 Specification</a>; <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebGLRenderingContext/depthFunc">MDN: depthFunc</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebGLRenderingContext/scissor">MDN: scissor</a>.</li>
+        <li><strong>Grundkörper, rekursive Kugel, Matrizen:</strong> eigene Umsetzung aus den Aufgaben 4 bis 6.</li>
+        <li><strong>Szene, Diagramm und Code:</strong> selbst erstellt; Farben aus der eigenen Palette von Aufgabe 3.</li>
+        <li><strong>Schrift:</strong> Bricolage Grotesque, Mathieu Triay, SIL Open Font License, über <a href="https://fonts.google.com/specimen/Bricolage+Grotesque">Google Fonts</a>.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p>Thomas Brehmer, M.Sc. Medieninformatik, BHT Berlin</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
